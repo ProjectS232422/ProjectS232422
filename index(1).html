@@ -1,0 +1,157 @@
+<!DOCTYPE html> 
+<head> 
+    <title>Interface for WebRTC File Transfer</title> 
+    <style> 
+        body, html {
+            height: 100%; /* Cover full height of the page */
+            margin: 0; /* Overwrite default margin */
+            display: flex; /* Applies Flexbox layout to position center content */
+            justify-content: center; /* To place the children elements in center horizontally in the Flex container */
+            align-items: center; /* For vertically centering the children elements in the Flex container */
+            flex-direction: column; 
+            background-color: #4CAF50; /* Background color of the page */
+            color: white; /* Font  color */
+            text-align: center; /* Centering text horizontally */
+        }
+
+        .container {
+            display: flex; /* Applying Flexbox layout to the container */
+            flex-direction: column; /* Vertically staking children*/
+            align-items: center; /*Horizontoally Centering children */
+            justify-content: center; /*Vertically Centering children */
+        }
+
+        .title {
+            margin-bottom: 20px; /* Spacing after the title*/
+        }
+
+        #fileInput {
+            margin-bottom: 10px; /* Spacing after the file input element */
+        }
+
+        #status, #fileReceived {
+            margin-bottom: 15px; /* Spacing below the statusand then some space below the file received elements */
+        }
+
+        button {
+            padding: 10px 20px; /* For padding inside the button */
+            background-color: #FF5722; /* Seting the button's background colorto red */
+            color: white;
+            border: none; 
+            cursor: pointer; /* Changing the cursor to a pointer when moving over the button */
+            transition: background-color 0.3s; /* Changing the background color on cursor over*/
+        }
+
+        button:hover {
+            background-color: #F44336; /* Changeing the button's background color when hoveredover by cursor */
+        }
+    </style>
+</head>
+<body>
+    <div class="title">
+        <h1>WebRTC File Transfer</h1> <!-- Setting up main title of the web page -->
+    </div>
+    <div class="container"> <!-- Wrapping the the interactive elements in a flex container for clear UI-->
+        <input type="file" id="fileInput" disabled> <!-- A file input element, will be disabled by default -->
+        <div id="status">Waiting for DataChannel to open...</div> <!-- Displays the status of the data channel, will change when connection is established -->
+        <div id="fileReceived"></div> <!-- Received file placeholder  -->
+        <button id="sendFile" style="display: none;">Send File</button> <!-- Send file button, will be hidden initially -->
+    </div>
+    <script src="http://172.16.182.131:3000/socket.io/socket.io.js"></script> <!-- Includes the Socket.IO library, IP of the machine running the http server -->
+    <script>
+        const socket = io('http://172.16.182.131:3000'); // Connects to the signaling server using Socket.io, shoudl have the same IP as server running machine
+        let dataChannel; // Variable for storing the data channel
+        const peerConnection = new RTCPeerConnection(); // Declearing a new RTCPeerConnection object for WebRTC
+
+        // Runs when a data channel creation event is detected, it will store the object 
+        peerConnection.ondatachannel = event => {
+            dataChannel = event.channel; // Stores the data channel object for further use
+            setupDataChannelEvents(); // Calls function to setup event listeners for the data channel
+        };
+
+        // Defines a function to setup data channel event listeners
+        function setupDataChannelEvents() {
+            dataChannel.onerror = (error) => {
+                console.error("Data Channel Error:", error); // Logs data channel errors
+            };
+
+            // Handles incoming messages over the data channel
+            dataChannel.onmessage = (event) => {
+                console.log("Data Channel Message:", event.data); // Logs the received data
+                document.getElementById('status').textContent = 'File received!'; // Updates status message
+                // Converts received data into a Blob and creates a download link
+                const receivedBlob = new Blob([event.data]);
+                const downloadLink = document.createElement('a');
+                downloadLink.href = URL.createObjectURL(receivedBlob);
+                downloadLink.download = 'received_file'; // Sets a default file name for download
+                downloadLink.textContent = 'Click to download the received file';
+                document.getElementById('fileReceived').appendChild(downloadLink); // Appends the download link to the DOM
+            };
+
+            // Updates the user interface element when the data channel is open
+            dataChannel.onopen = () => {
+                console.log("Data Channel Opened");
+                document.getElementById('fileInput').disabled = false; // Enables the file input element
+                document.getElementById('status').textContent = 'DataChannel opened. You can now send a file.';
+            };
+
+            // Updates the user interface element when the data channel is closed
+            dataChannel.onclose = () => {
+                console.log("Data Channel Closed");
+                document.getElementById('fileInput').disabled = true; // Disables the file input element
+                document.getElementById('status').textContent = 'DataChannel closed.';
+            };
+        }
+
+        // Handles ICE candidate events
+        peerConnection.onicecandidate = event => {
+            if (event.candidate) {
+                socket.emit('message', JSON.stringify({'ice': event.candidate})); // Sending the new ICE candidates to the signaling server
+            }
+        };
+
+        // Handles messages from the signaling server to establish a connection
+        socket.on('message', message => {
+            const data = JSON.parse(message);
+            if (data.ice) {
+                peerConnection.addIceCandidate(new RTCIceCandidate(data.ice)); // Adds new ICE candidates to the same server for flawless communication
+            } else if (data.sdp) {
+                // Sets remote description and creates answer or sets local description accordingly
+                peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp)).then(() => {
+                    if (data.sdp.type === 'offer') {
+                        peerConnection.createAnswer().then(answer => {
+                            peerConnection.setLocalDescription(answer);
+                            socket.emit('message', JSON.stringify({'sdp': answer})); // Sends the answer to the signaling server
+                        });
+                    }
+                });
+            }
+        });
+
+        // Creates the data channel and initiates the connection process
+        dataChannel = peerConnection.createDataChannel("fileTransfer");
+        setupDataChannelEvents(); // Sets up event listeners for the data channel 
+        peerConnection.createOffer().then(offer => {
+            peerConnection.setLocalDescription(offer);
+            socket.emit('message', JSON.stringify({'sdp': offer})); // Sends the offer to the signaling server
+        });
+
+        // Handles changes to the file input element
+        document.getElementById('fileInput').addEventListener('change', event => {
+            const file = event.target.files[0]; // Gets the selected file
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    // Sends the file over the data channel if it's open
+                    if (dataChannel && dataChannel.readyState === 'open') {
+                        dataChannel.send(reader.result);
+                    } else {
+                        console.error("Data Channel is not open");
+                    }
+                };
+                reader.readAsArrayBuffer(file); // Reads the file as an ArrayBuffer
+            }
+        });
+    </script>
+</body>
+</html>
